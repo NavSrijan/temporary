@@ -10,6 +10,7 @@ from transformers import (
 )
 from datasets import load_dataset
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer_path", type=str, required=True)
@@ -18,7 +19,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=5e-5)
-    parser.add_argument("--max_len", type=int, default=512)
+
+    # reserve space for <s> and </s>
+    parser.add_argument("--max_len", type=int, default=510)
+
     parser.add_argument("--from_scratch", action="store_true")
     args = parser.parse_args()
 
@@ -31,11 +35,13 @@ def main():
         data_files={"train": args.train_file}
     )
 
+    # tokenization with truncation to <= 510
     def tokenize_fn(examples):
         return tokenizer(
             examples["text"],
             truncation=True,
-            max_length=args.max_len
+            max_length=args.max_len,
+            padding=False
         )
 
     tokenized = dataset.map(
@@ -44,15 +50,36 @@ def main():
         remove_columns=["text"]
     )
 
+    # sanity filter
+    def valid_example(ex):
+        ids = ex["input_ids"]
+        if len(ids) == 0:
+            return False
+        if max(ids) >= tokenizer.vocab_size or min(ids) < 0:
+            return False
+        if len(ids) > args.max_len:
+            return False
+        return True
+
+    print("Filtering oversized or invalid samples...")
+    tokenized["train"] = tokenized["train"].filter(valid_example)
+
+    print("Computing max length...")
+    max_seen = 0
+    for ex in tokenized["train"]:
+        l = len(ex["input_ids"])
+        if l > max_seen:
+            max_seen = l
+    print("max tokenized length:", max_seen)
+
     print("Setting up config...")
     config = RobertaConfig(
         vocab_size=len(tokenizer),
-        max_position_embeddings=args.max_len,
+        max_position_embeddings=args.max_len + 2,
         pad_token_id=tokenizer.pad_token_id,
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id
     )
-
 
     if args.from_scratch:
         print("Initializing RoBERTa from scratch...")
@@ -76,7 +103,7 @@ def main():
         per_device_train_batch_size=args.batch_size,
         learning_rate=args.lr,
         weight_decay=0.01,
-        logging_steps=100,
+        logging_steps=50,
         save_steps=500,
         save_total_limit=2
     )
